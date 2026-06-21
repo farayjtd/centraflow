@@ -29,7 +29,6 @@ type Stock = {
   created_at: string;
   material: Material | null;
   warehouse: Warehouse | null;
-  reserved_project: { id: string; project_name: string } | null;
 };
 
 type Props = {
@@ -123,7 +122,7 @@ export function StokClient({ stocks, materials, warehouses }: Props) {
 
   const getStockStatus = (s: Stock) => {
     if (s.current_stock <= 0) return { label: 'Habis', variant: 'error' as const };
-    if (s.current_stock <= s.reserved_stock) return { label: 'Kritis', variant: 'warning' as const };
+    if (s.reserved_stock > 0 && s.current_stock <= s.reserved_stock) return { label: 'Kritis', variant: 'warning' as const };
     return { label: 'Tersedia', variant: 'success' as const };
   };
 
@@ -155,11 +154,11 @@ export function StokClient({ stocks, materials, warehouses }: Props) {
       render: (s: Stock) => (
         <div>
           <div style={{ fontWeight: '700', fontSize: '15px', color: 'var(--text-primary)' }}>
-            {s.current_stock} <span style={{ fontSize: '12px', fontWeight: '400', color: 'var(--text-secondary)' }}>{s.material?.unit}</span>
+            {s.current_stock}
           </div>
           {s.reserved_stock > 0 && (
-            <div style={{ fontSize: '11px', color: 'var(--warning)' }}>
-              Reserved: {s.reserved_stock} {s.material?.unit}
+            <div style={{ fontSize: '11px', color: '#D97706' }}>
+              Reserved: {s.reserved_stock}
             </div>
           )}
         </div>
@@ -175,7 +174,9 @@ export function StokClient({ stocks, materials, warehouses }: Props) {
     {
       key: 'updated_date', label: 'Update Terakhir',
       render: (s: Stock) => s.updated_date
-        ? new Date(s.updated_date).toLocaleDateString('id-ID', { day: 'numeric', month: 'short', year: 'numeric' })
+        ? new Date(s.updated_date).toLocaleDateString('id-ID', {
+            day: 'numeric', month: 'short', year: 'numeric',
+          })
         : '-',
     },
     {
@@ -200,7 +201,7 @@ export function StokClient({ stocks, materials, warehouses }: Props) {
         }}>{error}</div>
       )}
 
-      {/* Material — disabled saat edit */}
+      {/* Material */}
       <div style={{ display: 'flex', flexDirection: 'column', gap: '5px' }}>
         <label style={{ fontSize: '13px', fontWeight: '600', color: 'var(--text-primary)' }}>
           Material {modalMode === 'create' && <span style={{ color: 'var(--error)' }}>*</span>}
@@ -235,7 +236,7 @@ export function StokClient({ stocks, materials, warehouses }: Props) {
         )}
       </div>
 
-      {/* Warehouse — disabled saat edit */}
+      {/* Warehouse */}
       <div style={{ display: 'flex', flexDirection: 'column', gap: '5px' }}>
         <label style={{ fontSize: '13px', fontWeight: '600', color: 'var(--text-primary)' }}>
           Warehouse {modalMode === 'create' && <span style={{ color: 'var(--error)' }}>*</span>}
@@ -280,11 +281,11 @@ export function StokClient({ stocks, materials, warehouses }: Props) {
       {modalMode === 'edit' && selected && selected.reserved_stock > 0 && (
         <div style={{
           backgroundColor: '#FFFBEB', border: '1px solid #FDE68A',
-          borderRadius: '8px', padding: '10px 12px', fontSize: '13px', color: '#92400E',
+          borderRadius: '8px', padding: '10px 12px',
+          fontSize: '13px', color: '#92400E',
         }}>
-          ⚠️ Stok ini memiliki <strong>{selected.reserved_stock} {selected.material?.unit}</strong> yang sedang direserved
-          {selected.reserved_project && ` untuk proyek ${selected.reserved_project.project_name}`}.
-          Reserved stock tidak bisa diubah manual.
+          ⚠️ Stok ini memiliki <strong>{selected.reserved_stock} {selected.material?.unit}</strong> yang
+          sedang direserved untuk proyek terkait. Reserved stock tidak bisa diubah manual.
         </div>
       )}
     </div>
@@ -293,20 +294,24 @@ export function StokClient({ stocks, materials, warehouses }: Props) {
   const renderDetail = () => {
     if (!selected) return null;
     const st = getStockStatus(selected);
+    const stokEfektif = selected.current_stock - selected.reserved_stock;
+
     const rows = [
       { label: 'ID', value: selected.display_id },
       { label: 'Material', value: selected.material?.material_name ?? '-' },
       { label: 'Kategori', value: selected.material?.category?.name ?? '-' },
       { label: 'Satuan', value: selected.material?.unit ?? '-' },
       { label: 'Warehouse', value: selected.warehouse?.name ?? '-' },
-      { label: 'Stok Tersedia', value: `${selected.current_stock} ${selected.material?.unit ?? ''}` },
-      { label: 'Stok Reserved', value: `${selected.reserved_stock} ${selected.material?.unit ?? ''}` },
-      { label: 'Stok Efektif', value: `${selected.current_stock - selected.reserved_stock} ${selected.material?.unit ?? ''}` },
-      { label: 'Reserved untuk', value: selected.reserved_project?.project_name ?? '-' },
+      { label: 'Stok Tersedia', value: `${selected.current_stock}` },
+      { label: 'Stok Reserved', value: `${selected.reserved_stock}` },
+      { label: 'Stok Efektif', value: `${stokEfektif}` },
+      { label: 'Reserved untuk', value: selected.reserved_project_id ? 'Ada proyek terkait' : '-' },
       {
         label: 'Update Terakhir', value: selected.updated_date
-          ? new Date(selected.updated_date).toLocaleDateString('id-ID', { day: 'numeric', month: 'long', year: 'numeric' })
-          : '-'
+          ? new Date(selected.updated_date).toLocaleDateString('id-ID', {
+              day: 'numeric', month: 'long', year: 'numeric',
+            })
+          : '-',
       },
     ];
 
@@ -326,9 +331,6 @@ export function StokClient({ stocks, materials, warehouses }: Props) {
           </div>
           <div style={{ fontSize: '32px', fontWeight: '800', color: 'var(--primary)', marginBottom: '4px' }}>
             {selected.current_stock}
-            <span style={{ fontSize: '16px', fontWeight: '400', color: 'var(--text-secondary)', marginLeft: '6px' }}>
-              {selected.material?.unit}
-            </span>
           </div>
           <Badge label={st.label} variant={st.variant} />
         </div>

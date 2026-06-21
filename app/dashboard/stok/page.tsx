@@ -16,8 +16,7 @@ export default async function StokPage() {
       .select(`
         *,
         material:material_id(id, material_name, unit, category:category_id(name)),
-        warehouse:warehouse_id(id, name),
-        reserved_project:reserved_project_id(id, project_name)
+        warehouse:warehouse_id(id, name)
       `)
       .order('created_at', { ascending: false }),
     supabase
