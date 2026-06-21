@@ -45,6 +45,14 @@ type BOQItem = {
   current_stock?: number;
 };
 
+// BOQ item yang belum disimpan (hanya ada di state saat create)
+type PendingBOQItem = {
+  tempId: string;
+  material_id: string;
+  quantity_required: number;
+  material: Material | null;
+};
+
 type Project = {
   id: string;
   display_id: string;
@@ -92,12 +100,17 @@ export function ProyekClient({ projects, warehouses, materials, currentUser }: P
   const [uploadingBoq, setUploadingBoq] = useState(false);
   const boqFileRef = useRef<HTMLInputElement>(null);
 
-  // BOQ state
+  // BOQ state untuk detail/edit existing project
   const [boqItems, setBoqItems] = useState<BOQItem[]>([]);
   const [loadingBOQ, setLoadingBOQ] = useState(false);
   const [boqForm, setBOQForm] = useState(emptyBOQForm);
   const [boqError, setBOQError] = useState('');
   const [editBOQ, setEditBOQ] = useState<BOQItem | null>(null);
+
+  // Pending BOQ items untuk form create (belum ada project_id)
+  const [pendingBOQ, setPendingBOQ] = useState<PendingBOQItem[]>([]);
+  const [pendingBOQForm, setPendingBOQForm] = useState(emptyBOQForm);
+  const [pendingBOQError, setPendingBOQError] = useState('');
 
   const isAdmin = currentUser.roles.includes('Admin');
   const isTeknikSipil = currentUser.roles.includes('Teknik_Sipil');
@@ -131,11 +144,7 @@ export function ProyekClient({ projects, warehouses, materials, currentUser }: P
 
       const merged = (boqData ?? []).map((item: any) => {
         const ss = stockStatus?.find((s: any) => s.project_material_id === item.id);
-        return {
-          ...item,
-          stock_status: ss?.stock_status,
-          current_stock: ss?.current_stock,
-        };
+        return { ...item, stock_status: ss?.stock_status, current_stock: ss?.current_stock };
       });
 
       setBoqItems(merged);
@@ -148,6 +157,9 @@ export function ProyekClient({ projects, warehouses, materials, currentUser }: P
     setSelected(null);
     setForm(emptyForm);
     setBoqFile(null);
+    setPendingBOQ([]);
+    setPendingBOQForm(emptyBOQForm);
+    setPendingBOQError('');
     setError('');
     setModalMode('create');
   };
@@ -196,6 +208,25 @@ export function ProyekClient({ projects, warehouses, materials, currentUser }: P
     }
   };
 
+  // Tambah item BOQ ke pending list (saat create)
+  const handleAddPendingBOQ = () => {
+    if (!pendingBOQForm.material_id) return setPendingBOQError('Material harus dipilih.');
+    if (!pendingBOQForm.quantity_required || isNaN(parseFloat(pendingBOQForm.quantity_required))) {
+      return setPendingBOQError('Jumlah harus diisi.');
+    }
+    const mat = materials.find((m) => m.id === pendingBOQForm.material_id);
+    const already = pendingBOQ.find((p) => p.material_id === pendingBOQForm.material_id);
+    if (already) return setPendingBOQError('Material ini sudah ada di daftar BOQ.');
+    setPendingBOQError('');
+    setPendingBOQ((prev) => [...prev, {
+      tempId: Date.now().toString(),
+      material_id: pendingBOQForm.material_id,
+      quantity_required: parseFloat(pendingBOQForm.quantity_required),
+      material: mat ?? null,
+    }]);
+    setPendingBOQForm(emptyBOQForm);
+  };
+
   const handleSubmit = () => {
     if (!form.project_name.trim()) return setError('Nama proyek harus diisi.');
     if (!form.client_name.trim()) return setError('Nama klien harus diisi.');
@@ -221,21 +252,29 @@ export function ProyekClient({ projects, warehouses, materials, currentUser }: P
           boq_file_url: boqUrl,
         };
 
-        let result;
         if (modalMode === 'create') {
-          result = await createProject(payload);
+          const result = await createProject(payload);
+          if (result?.error) return setError(result.error);
+
+          // Insert semua pending BOQ items
+          if (result.id && pendingBOQ.length > 0) {
+            for (const item of pendingBOQ) {
+              await addBOQItem(result.id, item.material_id, item.quantity_required);
+            }
+          }
         } else {
-          result = await updateProject(selected!.id, { ...payload, status: form.status });
+          const result = await updateProject(selected!.id, { ...payload, status: form.status });
+          if (result?.error) return setError(result.error);
         }
 
-        if (result?.error) setError(result.error);
-        else setModalMode(null);
+        setModalMode(null);
       } catch {
         setError('Terjadi kesalahan.');
       }
     });
   };
 
+  // BOQ actions untuk detail modal
   const handleAddBOQ = () => {
     if (!boqForm.material_id) return setBOQError('Material harus dipilih.');
     if (!boqForm.quantity_required || isNaN(parseFloat(boqForm.quantity_required))) {
@@ -293,10 +332,7 @@ export function ProyekClient({ projects, warehouses, materials, currentUser }: P
         </div>
       ),
     },
-    {
-      key: 'warehouse', label: 'Warehouse',
-      render: (p: Project) => p.warehouse?.name ?? '-',
-    },
+    { key: 'warehouse', label: 'Warehouse', render: (p: Project) => p.warehouse?.name ?? '-' },
     {
       key: 'status', label: 'Status',
       render: (p: Project) => <Badge label={p.status} variant={statusVariant[p.status]} />,
@@ -323,16 +359,9 @@ export function ProyekClient({ projects, warehouses, materials, currentUser }: P
     },
   ];
 
-  const renderForm = () => (
+  // Komponen form proyek (dipakai di create dan edit)
+  const renderProjectFields = () => (
     <div style={{ display: 'flex', flexDirection: 'column', gap: '16px' }}>
-      {error && (
-        <div style={{
-          backgroundColor: '#FEF2F2', border: '1px solid #FECACA',
-          borderRadius: '8px', padding: '10px 12px',
-          color: 'var(--error)', fontSize: '13px',
-        }}>{error}</div>
-      )}
-
       <div style={{ display: 'flex', gap: '12px' }}>
         <div style={{ flex: 1 }}>
           <Input label="Nama Proyek" value={form.project_name}
@@ -361,7 +390,6 @@ export function ProyekClient({ projects, warehouses, materials, currentUser }: P
         </div>
       </div>
 
-      {/* Warehouse */}
       <div style={{ display: 'flex', flexDirection: 'column', gap: '5px' }}>
         <label style={{ fontSize: '13px', fontWeight: '600', color: 'var(--text-primary)' }}>Warehouse</label>
         <select value={form.warehouse_id} onChange={(e) => setForm({ ...form, warehouse_id: e.target.value })}
@@ -376,7 +404,6 @@ export function ProyekClient({ projects, warehouses, materials, currentUser }: P
         </select>
       </div>
 
-      {/* Status — edit only */}
       {modalMode === 'edit' && (
         <div style={{ display: 'flex', flexDirection: 'column', gap: '5px' }}>
           <label style={{ fontSize: '13px', fontWeight: '600', color: 'var(--text-primary)' }}>Status</label>
@@ -392,7 +419,6 @@ export function ProyekClient({ projects, warehouses, materials, currentUser }: P
         </div>
       )}
 
-      {/* Upload BOQ File */}
       <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
         <label style={{ fontSize: '13px', fontWeight: '600', color: 'var(--text-primary)' }}>
           File BOQ (PDF/Excel) — opsional
@@ -419,6 +445,112 @@ export function ProyekClient({ projects, warehouses, materials, currentUser }: P
           </a>
         )}
       </div>
+    </div>
+  );
+
+  // BOQ inline untuk form create
+  const renderPendingBOQ = () => (
+    <div style={{ marginTop: '8px' }}>
+      <div style={{
+        borderTop: '1px solid var(--border)', paddingTop: '20px',
+        fontWeight: '700', fontSize: '14px', color: 'var(--text-primary)', marginBottom: '12px',
+      }}>
+        Bill of Quantity (BOQ) — opsional
+      </div>
+
+      {pendingBOQError && (
+        <div style={{
+          backgroundColor: '#FEF2F2', border: '1px solid #FECACA',
+          borderRadius: '6px', padding: '8px 10px',
+          color: 'var(--error)', fontSize: '12px', marginBottom: '10px',
+        }}>{pendingBOQError}</div>
+      )}
+
+      {/* Input tambah item */}
+      <div style={{ display: 'flex', gap: '10px', alignItems: 'flex-end', marginBottom: '12px' }}>
+        <div style={{ flex: 2 }}>
+          <select
+            value={pendingBOQForm.material_id}
+            onChange={(e) => setPendingBOQForm({ ...pendingBOQForm, material_id: e.target.value })}
+            style={{
+              width: '100%', padding: '10px 12px',
+              border: '1px solid var(--border)', borderRadius: '8px',
+              fontSize: '14px', backgroundColor: 'var(--surface)',
+              color: pendingBOQForm.material_id ? 'var(--text-primary)' : 'var(--text-secondary)',
+              outline: 'none', cursor: 'pointer', boxSizing: 'border-box' as const,
+            }}>
+            <option value="">— Pilih Material —</option>
+            {materials.map((m) => (
+              <option key={m.id} value={m.id}>
+                {m.material_name} ({m.category?.name})
+              </option>
+            ))}
+          </select>
+        </div>
+        <div style={{ flex: 1 }}>
+          <Input
+            label=""
+            type="number"
+            value={pendingBOQForm.quantity_required}
+            onChange={(v) => setPendingBOQForm({ ...pendingBOQForm, quantity_required: v })}
+            placeholder="Jumlah"
+          />
+        </div>
+        <Button size="sm" onClick={handleAddPendingBOQ}>+ Tambah</Button>
+      </div>
+
+      {/* Daftar pending BOQ */}
+      {pendingBOQ.length > 0 && (
+        <div style={{ border: '1px solid var(--border)', borderRadius: '8px', overflow: 'hidden' }}>
+          <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '13px' }}>
+            <thead>
+              <tr style={{ backgroundColor: '#F8FAFC', borderBottom: '1px solid var(--border)' }}>
+                {['Material', 'Kategori', 'Jumlah', ''].map((h) => (
+                  <th key={h} style={{
+                    padding: '8px 12px', textAlign: 'left',
+                    fontWeight: '600', color: 'var(--text-secondary)',
+                    fontSize: '11px', textTransform: 'uppercase',
+                  }}>{h}</th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {pendingBOQ.map((item, i) => (
+                <tr key={item.tempId} style={{
+                  borderBottom: i < pendingBOQ.length - 1 ? '1px solid var(--border)' : 'none',
+                }}>
+                  <td style={{ padding: '8px 12px', fontWeight: '600', color: 'var(--text-primary)' }}>
+                    {item.material?.material_name ?? '-'}
+                  </td>
+                  <td style={{ padding: '8px 12px', color: 'var(--text-secondary)' }}>
+                    {item.material?.category?.name ?? '-'}
+                  </td>
+                  <td style={{ padding: '8px 12px', fontWeight: '700' }}>
+                    {item.quantity_required}
+                  </td>
+                  <td style={{ padding: '8px 12px' }}>
+                    <button
+                      type="button"
+                      onClick={() => setPendingBOQ((prev) => prev.filter((p) => p.tempId !== item.tempId))}
+                      style={{
+                        background: 'none', border: 'none', cursor: 'pointer',
+                        color: 'var(--error)', fontSize: '13px', fontWeight: '600',
+                      }}>
+                      Hapus
+                    </button>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+
+      {pendingBOQ.length === 0 && (
+        <p style={{ fontSize: '13px', color: 'var(--text-secondary)', textAlign: 'center', padding: '12px 0' }}>
+          Belum ada item BOQ — bisa ditambahkan setelah proyek dibuat juga
+        </p>
+      )}
     </div>
   );
 
@@ -473,7 +605,6 @@ export function ProyekClient({ projects, warehouses, materials, currentUser }: P
             Bill of Quantity (BOQ)
           </div>
 
-          {/* Form tambah/edit item BOQ */}
           {canEdit && (
             <div style={{
               backgroundColor: '#F8FAFC', borderRadius: '8px', padding: '14px',
@@ -520,13 +651,9 @@ export function ProyekClient({ projects, warehouses, materials, currentUser }: P
                   )}
                 </div>
                 <div style={{ flex: 1 }}>
-                  <Input
-                    label=""
-                    type="number"
-                    value={boqForm.quantity_required}
+                  <Input label="" type="number" value={boqForm.quantity_required}
                     onChange={(v) => setBOQForm({ ...boqForm, quantity_required: v })}
-                    placeholder="Jumlah"
-                  />
+                    placeholder="Jumlah" />
                 </div>
                 <Button onClick={handleAddBOQ} disabled={isPending} size="sm">
                   {isPending ? '...' : editBOQ ? 'Simpan' : 'Tambah'}
@@ -540,7 +667,6 @@ export function ProyekClient({ projects, warehouses, materials, currentUser }: P
             </div>
           )}
 
-          {/* Tabel BOQ */}
           {loadingBOQ ? (
             <div style={{ textAlign: 'center', padding: '24px', color: 'var(--text-secondary)', fontSize: '14px' }}>
               Memuat data BOQ...
@@ -664,16 +790,26 @@ export function ProyekClient({ projects, warehouses, materials, currentUser }: P
 
       {/* Modal Create */}
       <Modal open={modalMode === 'create'} onClose={() => setModalMode(null)}
-        title="Tambah Proyek Baru" width={600}
+        title="Tambah Proyek Baru" width={640}
         footer={
           <>
             <Button variant="secondary" onClick={() => setModalMode(null)}>Batal</Button>
             <Button onClick={handleSubmit} disabled={isPending || uploadingBoq}>
-              {isPending ? 'Menyimpan...' : 'Buat Proyek'}
+              {isPending ? 'Menyimpan...' : `Buat Proyek${pendingBOQ.length > 0 ? ` + ${pendingBOQ.length} Item BOQ` : ''}`}
             </Button>
           </>
         }>
-        {renderForm()}
+        <div style={{ display: 'flex', flexDirection: 'column', gap: '16px' }}>
+          {error && (
+            <div style={{
+              backgroundColor: '#FEF2F2', border: '1px solid #FECACA',
+              borderRadius: '8px', padding: '10px 12px',
+              color: 'var(--error)', fontSize: '13px',
+            }}>{error}</div>
+          )}
+          {renderProjectFields()}
+          {renderPendingBOQ()}
+        </div>
       </Modal>
 
       {/* Modal Edit */}
@@ -687,12 +823,21 @@ export function ProyekClient({ projects, warehouses, materials, currentUser }: P
             </Button>
           </>
         }>
-        {renderForm()}
+        <div style={{ display: 'flex', flexDirection: 'column', gap: '16px' }}>
+          {error && (
+            <div style={{
+              backgroundColor: '#FEF2F2', border: '1px solid #FECACA',
+              borderRadius: '8px', padding: '10px 12px',
+              color: 'var(--error)', fontSize: '13px',
+            }}>{error}</div>
+          )}
+          {renderProjectFields()}
+        </div>
       </Modal>
 
       {/* Modal Detail + BOQ */}
       <Modal open={modalMode === 'detail'} onClose={() => setModalMode(null)}
-        title={`Detail Proyek & BOQ`} width={720}
+        title="Detail Proyek & BOQ" width={720}
         footer={
           <>
             <Button variant="secondary" onClick={() => setModalMode(null)}>Tutup</Button>
@@ -717,7 +862,7 @@ export function ProyekClient({ projects, warehouses, materials, currentUser }: P
         }>
         <p style={{ color: 'var(--text-secondary)', fontSize: '14px' }}>
           Proyek <strong style={{ color: 'var(--text-primary)' }}>{deleteModal?.project_name}</strong> dan
-          seluruh data terkait (BOQ, foto progres, eksekusi) akan dihapus permanen.
+          seluruh data terkait akan dihapus permanen.
           Tindakan ini <strong style={{ color: 'var(--error)' }}>tidak dapat dibatalkan</strong>.
         </p>
       </Modal>
