@@ -45,7 +45,6 @@ type BOQItem = {
   current_stock?: number;
 };
 
-// BOQ item yang belum disimpan (hanya ada di state saat create)
 type PendingBOQItem = {
   tempId: string;
   material_id: string;
@@ -87,6 +86,9 @@ const emptyForm = {
 
 const emptyBOQForm = { material_id: '', quantity_required: '' };
 
+const toggleMultiSelect = (list: string[], id: string): string[] =>
+  list.includes(id) ? list.filter((i) => i !== id) : [...list, id];
+
 export function ProyekClient({ projects, warehouses, materials, currentUser }: Props) {
   const [isPending, startTransition] = useTransition();
   const [modalMode, setModalMode] = useState<'create' | 'edit' | 'detail' | null>(null);
@@ -107,14 +109,34 @@ export function ProyekClient({ projects, warehouses, materials, currentUser }: P
   const [boqError, setBOQError] = useState('');
   const [editBOQ, setEditBOQ] = useState<BOQItem | null>(null);
 
-  // Pending BOQ items untuk form create (belum ada project_id)
+  // Pending BOQ items untuk form create
   const [pendingBOQ, setPendingBOQ] = useState<PendingBOQItem[]>([]);
   const [pendingBOQForm, setPendingBOQForm] = useState(emptyBOQForm);
   const [pendingBOQError, setPendingBOQError] = useState('');
 
+  // Eksekusi state
+  const [eksekusiData, setEksekusiData] = useState<any>(null);
+  const [loadingEksekusi, setLoadingEksekusi] = useState(false);
+  const [showEksekusiForm, setShowEksekusiForm] = useState(false);
+  const [eksekusiForm, setEksekusiForm] = useState({
+    mandor_id: '',
+    installer_ids: [] as string[],
+    truck_ids: [] as string[],
+    driver_ids: [] as string[],
+  });
+  const [eksekusiError, setEksekusiError] = useState('');
+  const [stockReady, setStockReady] = useState(false);
+
+  // List untuk dropdown eksekusi
+  const [mandorList, setMandorList] = useState<any[]>([]);
+  const [tukangList, setTukangList] = useState<any[]>([]);
+  const [sopirList, setSopirList] = useState<any[]>([]);
+  const [truckList, setTruckList] = useState<any[]>([]);
+
   const isAdmin = currentUser.roles.includes('Admin');
   const isTeknikSipil = currentUser.roles.includes('Teknik_Sipil');
   const canEdit = isAdmin || isTeknikSipil;
+  const supabase = createClient();
 
   const filtered = projects.filter((p) => {
     const matchSearch =
@@ -125,7 +147,7 @@ export function ProyekClient({ projects, warehouses, materials, currentUser }: P
     return matchSearch && matchStatus;
   });
 
-  const supabase = createClient();
+  // ─── Data Fetching ───────────────────────────────────────────────────────────
 
   const fetchBOQ = async (projectId: string) => {
     setLoadingBOQ(true);
@@ -152,6 +174,75 @@ export function ProyekClient({ projects, warehouses, materials, currentUser }: P
       setLoadingBOQ(false);
     }
   };
+
+  const fetchEksekusi = async (projectId: string) => {
+    setLoadingEksekusi(true);
+    try {
+      const { data: sr } = await supabase
+        .from('v_project_stock_ready')
+        .select('all_stock_ready, total_items, items_ready')
+        .eq('project_id', projectId)
+        .single();
+      setStockReady(sr?.all_stock_ready ?? false);
+
+      const { data: exec } = await supabase
+        .from('project_execution')
+        .select(`
+          *,
+          mandor:mandor_id(id, full_name, avatar_url),
+          project_execution_installers(user:user_id(id, full_name, avatar_url)),
+          project_execution_trucks(truck:truck_id(id, plate_number, truck_type)),
+          project_execution_drivers(user:user_id(id, full_name, avatar_url))
+        `)
+        .eq('project_id', projectId)
+        .single();
+      setEksekusiData(exec ?? null);
+
+      if (exec) {
+        setEksekusiForm({
+          mandor_id: exec.mandor_id ?? '',
+          installer_ids: exec.project_execution_installers?.map((i: any) => i.user.id) ?? [],
+          truck_ids: exec.project_execution_trucks?.map((t: any) => t.truck.id) ?? [],
+          driver_ids: exec.project_execution_drivers?.map((d: any) => d.user.id) ?? [],
+        });
+      } else {
+        setEksekusiForm({ mandor_id: '', installer_ids: [], truck_ids: [], driver_ids: [] });
+      }
+
+      const { data: roles } = await supabase
+        .from('user_roles')
+        .select('user_id, role')
+        .in('role', ['Mandor', 'Tukang', 'Sopir']);
+
+      const userIds = [...new Set(roles?.map((r: any) => r.user_id) ?? [])];
+
+      if (userIds.length > 0) {
+        const { data: users } = await supabase
+          .from('users')
+          .select('id, full_name, avatar_url')
+          .in('id', userIds)
+          .eq('is_active', true);
+
+        const mandorIds = roles?.filter((r: any) => r.role === 'Mandor').map((r: any) => r.user_id) ?? [];
+        const tukangIds = roles?.filter((r: any) => r.role === 'Tukang').map((r: any) => r.user_id) ?? [];
+        const sopirIds  = roles?.filter((r: any) => r.role === 'Sopir').map((r: any) => r.user_id) ?? [];
+
+        setMandorList(users?.filter((u: any) => mandorIds.includes(u.id)) ?? []);
+        setTukangList(users?.filter((u: any) => tukangIds.includes(u.id)) ?? []);
+        setSopirList(users?.filter((u: any) => sopirIds.includes(u.id)) ?? []);
+      }
+
+      const { data: trucks } = await supabase
+        .from('trucks')
+        .select('id, plate_number, truck_type, status')
+        .eq('status', 'Standby');
+      setTruckList(trucks ?? []);
+    } finally {
+      setLoadingEksekusi(false);
+    }
+  };
+
+  // ─── Modal Openers ───────────────────────────────────────────────────────────
 
   const openCreate = () => {
     setSelected(null);
@@ -187,9 +278,14 @@ export function ProyekClient({ projects, warehouses, materials, currentUser }: P
     setBOQForm(emptyBOQForm);
     setBOQError('');
     setEditBOQ(null);
+    setShowEksekusiForm(false);
+    setEksekusiError('');
     fetchBOQ(p.id);
+    fetchEksekusi(p.id);
     setModalMode('detail');
   };
+
+  // ─── Handlers ────────────────────────────────────────────────────────────────
 
   const uploadBoqFile = async (file: File): Promise<string | null> => {
     setUploadingBoq(true);
@@ -208,12 +304,10 @@ export function ProyekClient({ projects, warehouses, materials, currentUser }: P
     }
   };
 
-  // Tambah item BOQ ke pending list (saat create)
   const handleAddPendingBOQ = () => {
     if (!pendingBOQForm.material_id) return setPendingBOQError('Material harus dipilih.');
-    if (!pendingBOQForm.quantity_required || isNaN(parseFloat(pendingBOQForm.quantity_required))) {
+    if (!pendingBOQForm.quantity_required || isNaN(parseFloat(pendingBOQForm.quantity_required)))
       return setPendingBOQError('Jumlah harus diisi.');
-    }
     const mat = materials.find((m) => m.id === pendingBOQForm.material_id);
     const already = pendingBOQ.find((p) => p.material_id === pendingBOQForm.material_id);
     if (already) return setPendingBOQError('Material ini sudah ada di daftar BOQ.');
@@ -255,8 +349,6 @@ export function ProyekClient({ projects, warehouses, materials, currentUser }: P
         if (modalMode === 'create') {
           const result = await createProject(payload);
           if (result?.error) return setError(result.error);
-
-          // Insert semua pending BOQ items
           if (result.id && pendingBOQ.length > 0) {
             for (const item of pendingBOQ) {
               await addBOQItem(result.id, item.material_id, item.quantity_required);
@@ -274,21 +366,17 @@ export function ProyekClient({ projects, warehouses, materials, currentUser }: P
     });
   };
 
-  // BOQ actions untuk detail modal
   const handleAddBOQ = () => {
     if (!boqForm.material_id) return setBOQError('Material harus dipilih.');
-    if (!boqForm.quantity_required || isNaN(parseFloat(boqForm.quantity_required))) {
+    if (!boqForm.quantity_required || isNaN(parseFloat(boqForm.quantity_required)))
       return setBOQError('Jumlah harus diisi.');
-    }
     setBOQError('');
 
     startTransition(async () => {
-      let result;
-      if (editBOQ) {
-        result = await updateBOQItem(editBOQ.id, parseFloat(boqForm.quantity_required));
-      } else {
-        result = await addBOQItem(selected!.id, boqForm.material_id, parseFloat(boqForm.quantity_required));
-      }
+      const result = editBOQ
+        ? await updateBOQItem(editBOQ.id, parseFloat(boqForm.quantity_required))
+        : await addBOQItem(selected!.id, boqForm.material_id, parseFloat(boqForm.quantity_required));
+
       if (result?.error) {
         setBOQError(result.error);
       } else {
@@ -306,6 +394,33 @@ export function ProyekClient({ projects, warehouses, materials, currentUser }: P
     });
   };
 
+  const handleEksekusi = () => {
+    setEksekusiError('');
+    startTransition(async () => {
+      try {
+        const { data, error } = await supabase.functions.invoke('eksekusi-project', {
+          body: {
+            project_id: selected!.id,
+            mandor_id: eksekusiForm.mandor_id || null,
+            installer_ids: eksekusiForm.installer_ids,
+            truck_ids: eksekusiForm.truck_ids,
+            driver_ids: eksekusiForm.driver_ids,
+          },
+        });
+
+        if (error || data?.error) {
+          setEksekusiError(data?.error ?? error?.message ?? 'Gagal eksekusi proyek');
+          return;
+        }
+
+        setShowEksekusiForm(false);
+        fetchEksekusi(selected!.id);
+      } catch {
+        setEksekusiError('Terjadi kesalahan.');
+      }
+    });
+  };
+
   const confirmDelete = () => {
     if (!deleteModal) return;
     startTransition(async () => {
@@ -314,12 +429,44 @@ export function ProyekClient({ projects, warehouses, materials, currentUser }: P
     });
   };
 
+  // ─── Helpers ─────────────────────────────────────────────────────────────────
+
   const stockBadge = (status?: string) => {
-    if (status === 'Cukup') return <Badge label="Cukup" variant="success" />;
+    if (status === 'Cukup')  return <Badge label="Cukup"  variant="success" />;
     if (status === 'Kurang') return <Badge label="Kurang" variant="warning" />;
     if (status === 'Kosong') return <Badge label="Kosong" variant="error" />;
     return <Badge label="—" variant="default" />;
   };
+
+  const selectStyle = (hasValue: boolean): React.CSSProperties => ({
+    padding: '10px 12px',
+    border: '1px solid var(--border)',
+    borderRadius: '8px',
+    fontSize: '14px',
+    color: hasValue ? 'var(--text-primary)' : 'var(--text-secondary)',
+    backgroundColor: 'var(--surface)',
+    outline: 'none',
+    width: '100%',
+    boxSizing: 'border-box',
+    cursor: 'pointer',
+  });
+
+  const chipStyle = (active: boolean): React.CSSProperties => ({
+    display: 'flex',
+    alignItems: 'center',
+    gap: '6px',
+    padding: '6px 12px',
+    borderRadius: '8px',
+    cursor: 'pointer',
+    border: `1.5px solid ${active ? 'var(--primary)' : 'var(--border)'}`,
+    backgroundColor: active ? '#EFF6FF' : 'transparent',
+    fontSize: '13px',
+    color: active ? 'var(--primary)' : 'var(--text-secondary)',
+    fontWeight: active ? '600' : '400',
+    userSelect: 'none',
+  });
+
+  // ─── Render Helpers ───────────────────────────────────────────────────────────
 
   const columns = [
     { key: 'display_id', label: 'ID', width: '90px' },
@@ -359,7 +506,6 @@ export function ProyekClient({ projects, warehouses, materials, currentUser }: P
     },
   ];
 
-  // Komponen form proyek (dipakai di create dan edit)
   const renderProjectFields = () => (
     <div style={{ display: 'flex', flexDirection: 'column', gap: '16px' }}>
       <div style={{ display: 'flex', gap: '12px' }}>
@@ -392,13 +538,9 @@ export function ProyekClient({ projects, warehouses, materials, currentUser }: P
 
       <div style={{ display: 'flex', flexDirection: 'column', gap: '5px' }}>
         <label style={{ fontSize: '13px', fontWeight: '600', color: 'var(--text-primary)' }}>Warehouse</label>
-        <select value={form.warehouse_id} onChange={(e) => setForm({ ...form, warehouse_id: e.target.value })}
-          style={{
-            padding: '10px 12px', border: '1px solid var(--border)', borderRadius: '8px',
-            fontSize: '14px', color: form.warehouse_id ? 'var(--text-primary)' : 'var(--text-secondary)',
-            backgroundColor: 'var(--surface)', outline: 'none',
-            width: '100%', boxSizing: 'border-box' as const, cursor: 'pointer',
-          }}>
+        <select value={form.warehouse_id}
+          onChange={(e) => setForm({ ...form, warehouse_id: e.target.value })}
+          style={selectStyle(!!form.warehouse_id)}>
           <option value="">— Pilih Warehouse —</option>
           {warehouses.map((w) => <option key={w.id} value={w.id}>{w.name}</option>)}
         </select>
@@ -407,13 +549,9 @@ export function ProyekClient({ projects, warehouses, materials, currentUser }: P
       {modalMode === 'edit' && (
         <div style={{ display: 'flex', flexDirection: 'column', gap: '5px' }}>
           <label style={{ fontSize: '13px', fontWeight: '600', color: 'var(--text-primary)' }}>Status</label>
-          <select value={form.status} onChange={(e) => setForm({ ...form, status: e.target.value as ProjectStatus })}
-            style={{
-              padding: '10px 12px', border: '1px solid var(--border)', borderRadius: '8px',
-              fontSize: '14px', color: 'var(--text-primary)',
-              backgroundColor: 'var(--surface)', outline: 'none',
-              width: '100%', boxSizing: 'border-box' as const, cursor: 'pointer',
-            }}>
+          <select value={form.status}
+            onChange={(e) => setForm({ ...form, status: e.target.value as ProjectStatus })}
+            style={selectStyle(true)}>
             {PROJECT_STATUSES.map((s) => <option key={s} value={s}>{s}</option>)}
           </select>
         </div>
@@ -437,7 +575,8 @@ export function ProyekClient({ projects, warehouses, materials, currentUser }: P
           </span>
         </div>
         <input ref={boqFileRef} type="file" accept=".pdf,.xlsx,.xls"
-          style={{ display: 'none' }} onChange={(e) => setBoqFile(e.target.files?.[0] ?? null)} />
+          style={{ display: 'none' }}
+          onChange={(e) => setBoqFile(e.target.files?.[0] ?? null)} />
         {form.boq_file_url && !boqFile && (
           <a href={form.boq_file_url} target="_blank" rel="noopener noreferrer"
             style={{ fontSize: '12px', color: 'var(--primary)' }}>
@@ -448,7 +587,6 @@ export function ProyekClient({ projects, warehouses, materials, currentUser }: P
     </div>
   );
 
-  // BOQ inline untuk form create
   const renderPendingBOQ = () => (
     <div style={{ marginTop: '8px' }}>
       <div style={{
@@ -460,82 +598,58 @@ export function ProyekClient({ projects, warehouses, materials, currentUser }: P
 
       {pendingBOQError && (
         <div style={{
-          backgroundColor: '#FEF2F2', border: '1px solid #FECACA',
-          borderRadius: '6px', padding: '8px 10px',
-          color: 'var(--error)', fontSize: '12px', marginBottom: '10px',
+          backgroundColor: '#FEF2F2', border: '1px solid #FECACA', borderRadius: '6px',
+          padding: '8px 10px', color: 'var(--error)', fontSize: '12px', marginBottom: '10px',
         }}>{pendingBOQError}</div>
       )}
 
-      {/* Input tambah item */}
       <div style={{ display: 'flex', gap: '10px', alignItems: 'flex-end', marginBottom: '12px' }}>
         <div style={{ flex: 2 }}>
-          <select
-            value={pendingBOQForm.material_id}
+          <select value={pendingBOQForm.material_id}
             onChange={(e) => setPendingBOQForm({ ...pendingBOQForm, material_id: e.target.value })}
-            style={{
-              width: '100%', padding: '10px 12px',
-              border: '1px solid var(--border)', borderRadius: '8px',
-              fontSize: '14px', backgroundColor: 'var(--surface)',
-              color: pendingBOQForm.material_id ? 'var(--text-primary)' : 'var(--text-secondary)',
-              outline: 'none', cursor: 'pointer', boxSizing: 'border-box' as const,
-            }}>
+            style={selectStyle(!!pendingBOQForm.material_id)}>
             <option value="">— Pilih Material —</option>
             {materials.map((m) => (
-              <option key={m.id} value={m.id}>
-                {m.material_name} ({m.category?.name})
-              </option>
+              <option key={m.id} value={m.id}>{m.material_name} ({m.category?.name})</option>
             ))}
           </select>
         </div>
         <div style={{ flex: 1 }}>
-          <Input
-            label=""
-            type="number"
-            value={pendingBOQForm.quantity_required}
+          <Input label="" type="number" value={pendingBOQForm.quantity_required}
             onChange={(v) => setPendingBOQForm({ ...pendingBOQForm, quantity_required: v })}
-            placeholder="Jumlah"
-          />
+            placeholder="Jumlah" />
         </div>
         <Button size="sm" onClick={handleAddPendingBOQ}>+ Tambah</Button>
       </div>
 
-      {/* Daftar pending BOQ */}
-      {pendingBOQ.length > 0 && (
+      {pendingBOQ.length > 0 ? (
         <div style={{ border: '1px solid var(--border)', borderRadius: '8px', overflow: 'hidden' }}>
           <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '13px' }}>
             <thead>
               <tr style={{ backgroundColor: '#F8FAFC', borderBottom: '1px solid var(--border)' }}>
                 {['Material', 'Kategori', 'Jumlah', ''].map((h) => (
                   <th key={h} style={{
-                    padding: '8px 12px', textAlign: 'left',
-                    fontWeight: '600', color: 'var(--text-secondary)',
-                    fontSize: '11px', textTransform: 'uppercase',
+                    padding: '8px 12px', textAlign: 'left', fontWeight: '600',
+                    color: 'var(--text-secondary)', fontSize: '11px', textTransform: 'uppercase',
                   }}>{h}</th>
                 ))}
               </tr>
             </thead>
             <tbody>
               {pendingBOQ.map((item, i) => (
-                <tr key={item.tempId} style={{
-                  borderBottom: i < pendingBOQ.length - 1 ? '1px solid var(--border)' : 'none',
-                }}>
+                <tr key={item.tempId}
+                  style={{ borderBottom: i < pendingBOQ.length - 1 ? '1px solid var(--border)' : 'none' }}>
                   <td style={{ padding: '8px 12px', fontWeight: '600', color: 'var(--text-primary)' }}>
                     {item.material?.material_name ?? '-'}
                   </td>
                   <td style={{ padding: '8px 12px', color: 'var(--text-secondary)' }}>
                     {item.material?.category?.name ?? '-'}
                   </td>
-                  <td style={{ padding: '8px 12px', fontWeight: '700' }}>
-                    {item.quantity_required}
-                  </td>
+                  <td style={{ padding: '8px 12px', fontWeight: '700' }}>{item.quantity_required}</td>
                   <td style={{ padding: '8px 12px' }}>
-                    <button
-                      type="button"
+                    <button type="button"
                       onClick={() => setPendingBOQ((prev) => prev.filter((p) => p.tempId !== item.tempId))}
-                      style={{
-                        background: 'none', border: 'none', cursor: 'pointer',
-                        color: 'var(--error)', fontSize: '13px', fontWeight: '600',
-                      }}>
+                      style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--error)', fontSize: '13px', fontWeight: '600' }}>
                       Hapus
                     </button>
                   </td>
@@ -544,9 +658,7 @@ export function ProyekClient({ projects, warehouses, materials, currentUser }: P
             </tbody>
           </table>
         </div>
-      )}
-
-      {pendingBOQ.length === 0 && (
+      ) : (
         <p style={{ fontSize: '13px', color: 'var(--text-secondary)', textAlign: 'center', padding: '12px 0' }}>
           Belum ada item BOQ — bisa ditambahkan setelah proyek dibuat juga
         </p>
@@ -559,11 +671,8 @@ export function ProyekClient({ projects, warehouses, materials, currentUser }: P
 
     return (
       <div>
-        {/* Info proyek */}
-        <div style={{
-          backgroundColor: '#EFF6FF', borderRadius: '10px',
-          padding: '16px', marginBottom: '20px',
-        }}>
+        {/* Info Proyek */}
+        <div style={{ backgroundColor: '#EFF6FF', borderRadius: '10px', padding: '16px', marginBottom: '20px' }}>
           <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: '12px' }}>
             <div>
               <div style={{ fontWeight: '700', fontSize: '16px', color: 'var(--text-primary)' }}>
@@ -581,8 +690,8 @@ export function ProyekClient({ projects, warehouses, materials, currentUser }: P
           <div style={{ display: 'flex', gap: '24px', flexWrap: 'wrap' }}>
             {[
               { label: 'Warehouse', value: selected.warehouse?.name ?? '-' },
-              { label: 'Mulai', value: selected.start_date ? new Date(selected.start_date).toLocaleDateString('id-ID') : '-' },
-              { label: 'Target', value: selected.end_target ? new Date(selected.end_target).toLocaleDateString('id-ID') : '-' },
+              { label: 'Mulai',    value: selected.start_date ? new Date(selected.start_date).toLocaleDateString('id-ID') : '-' },
+              { label: 'Target',  value: selected.end_target  ? new Date(selected.end_target).toLocaleDateString('id-ID')  : '-' },
               { label: 'HP Klien', value: selected.client_phone ?? '-' },
             ].map((item) => (
               <div key={item.label}>
@@ -613,13 +722,14 @@ export function ProyekClient({ projects, warehouses, materials, currentUser }: P
               <div style={{ fontSize: '13px', fontWeight: '600', color: 'var(--text-primary)', marginBottom: '10px' }}>
                 {editBOQ ? `Edit Item: ${editBOQ.material?.material_name}` : '+ Tambah Item BOQ'}
               </div>
+
               {boqError && (
                 <div style={{
-                  backgroundColor: '#FEF2F2', border: '1px solid #FECACA',
-                  borderRadius: '6px', padding: '8px 10px',
-                  color: 'var(--error)', fontSize: '12px', marginBottom: '10px',
+                  backgroundColor: '#FEF2F2', border: '1px solid #FECACA', borderRadius: '6px',
+                  padding: '8px 10px', color: 'var(--error)', fontSize: '12px', marginBottom: '10px',
                 }}>{boqError}</div>
               )}
+
               <div style={{ display: 'flex', gap: '10px', alignItems: 'flex-end' }}>
                 <div style={{ flex: 2 }}>
                   {editBOQ ? (
@@ -631,21 +741,12 @@ export function ProyekClient({ projects, warehouses, materials, currentUser }: P
                       {editBOQ.material?.material_name}
                     </div>
                   ) : (
-                    <select
-                      value={boqForm.material_id}
+                    <select value={boqForm.material_id}
                       onChange={(e) => setBOQForm({ ...boqForm, material_id: e.target.value })}
-                      style={{
-                        width: '100%', padding: '10px 12px',
-                        border: '1px solid var(--border)', borderRadius: '8px',
-                        fontSize: '14px', backgroundColor: 'var(--surface)',
-                        color: boqForm.material_id ? 'var(--text-primary)' : 'var(--text-secondary)',
-                        outline: 'none', cursor: 'pointer', boxSizing: 'border-box' as const,
-                      }}>
+                      style={selectStyle(!!boqForm.material_id)}>
                       <option value="">— Pilih Material —</option>
                       {materials.map((m) => (
-                        <option key={m.id} value={m.id}>
-                          {m.material_name} ({m.category?.name})
-                        </option>
+                        <option key={m.id} value={m.id}>{m.material_name} ({m.category?.name})</option>
                       ))}
                     </select>
                   )}
@@ -659,7 +760,8 @@ export function ProyekClient({ projects, warehouses, materials, currentUser }: P
                   {isPending ? '...' : editBOQ ? 'Simpan' : 'Tambah'}
                 </Button>
                 {editBOQ && (
-                  <Button variant="ghost" size="sm" onClick={() => { setEditBOQ(null); setBOQForm(emptyBOQForm); }}>
+                  <Button variant="ghost" size="sm"
+                    onClick={() => { setEditBOQ(null); setBOQForm(emptyBOQForm); }}>
                     Batal
                   </Button>
                 )}
@@ -682,18 +784,17 @@ export function ProyekClient({ projects, warehouses, materials, currentUser }: P
                   <tr style={{ backgroundColor: '#F8FAFC', borderBottom: '1px solid var(--border)' }}>
                     {['ID', 'Material', 'Kategori', 'Qty', 'Stok', 'Status Stok', canEdit ? 'Aksi' : ''].filter(Boolean).map((h) => (
                       <th key={h} style={{
-                        padding: '10px 12px', textAlign: 'left',
-                        fontWeight: '600', color: 'var(--text-secondary)',
-                        fontSize: '11px', textTransform: 'uppercase', letterSpacing: '0.05em',
+                        padding: '10px 12px', textAlign: 'left', fontWeight: '600',
+                        color: 'var(--text-secondary)', fontSize: '11px',
+                        textTransform: 'uppercase', letterSpacing: '0.05em',
                       }}>{h}</th>
                     ))}
                   </tr>
                 </thead>
                 <tbody>
                   {boqItems.map((item, i) => (
-                    <tr key={item.id} style={{
-                      borderBottom: i < boqItems.length - 1 ? '1px solid var(--border)' : 'none',
-                    }}>
+                    <tr key={item.id}
+                      style={{ borderBottom: i < boqItems.length - 1 ? '1px solid var(--border)' : 'none' }}>
                       <td style={{ padding: '10px 12px', color: 'var(--text-secondary)', fontSize: '12px' }}>
                         {item.display_id}
                       </td>
@@ -709,9 +810,7 @@ export function ProyekClient({ projects, warehouses, materials, currentUser }: P
                       <td style={{ padding: '10px 12px', color: 'var(--text-secondary)' }}>
                         {item.current_stock ?? '-'}
                       </td>
-                      <td style={{ padding: '10px 12px' }}>
-                        {stockBadge(item.stock_status)}
-                      </td>
+                      <td style={{ padding: '10px 12px' }}>{stockBadge(item.stock_status)}</td>
                       {canEdit && (
                         <td style={{ padding: '10px 12px' }}>
                           <div style={{ display: 'flex', gap: '6px' }}>
@@ -730,9 +829,207 @@ export function ProyekClient({ projects, warehouses, materials, currentUser }: P
             </div>
           )}
         </div>
+
+        {/* Eksekusi Section */}
+        <div style={{ marginTop: '24px', borderTop: '1px solid var(--border)', paddingTop: '20px' }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '16px' }}>
+            <div style={{ fontWeight: '700', fontSize: '15px', color: 'var(--text-primary)' }}>
+              Tim Eksekusi
+            </div>
+            {(isAdmin || currentUser.roles.includes('Kepala_WH')) && (
+              <Button size="sm" variant={showEksekusiForm ? 'ghost' : 'secondary'}
+                onClick={() => setShowEksekusiForm(!showEksekusiForm)}>
+                {showEksekusiForm ? 'Tutup Form' : eksekusiData ? 'Edit Tim' : 'Assign Tim'}
+              </Button>
+            )}
+          </div>
+
+          {loadingEksekusi ? (
+            <div style={{ textAlign: 'center', padding: '16px', color: 'var(--text-secondary)', fontSize: '14px' }}>
+              Memuat data eksekusi...
+            </div>
+          ) : eksekusiData && !showEksekusiForm ? (
+            <div style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
+              {[
+                { label: 'Mandor', items: eksekusiData.mandor ? [eksekusiData.mandor] : [] },
+                { label: 'Tukang', items: eksekusiData.project_execution_installers?.map((i: any) => i.user) ?? [] },
+                { label: 'Sopir',  items: eksekusiData.project_execution_drivers?.map((d: any) => d.user) ?? [] },
+              ].map((group) => (
+                <div key={group.label}>
+                  <div style={{ fontSize: '12px', fontWeight: '600', color: 'var(--text-secondary)', marginBottom: '6px', textTransform: 'uppercase' }}>
+                    {group.label}
+                  </div>
+                  {group.items.length === 0 ? (
+                    <span style={{ fontSize: '13px', color: 'var(--text-secondary)' }}>—</span>
+                  ) : (
+                    <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap' }}>
+                      {group.items.map((u: any) => (
+                        <div key={u.id} style={{
+                          display: 'flex', alignItems: 'center', gap: '6px',
+                          padding: '4px 10px', backgroundColor: '#EFF6FF',
+                          borderRadius: '20px', fontSize: '13px', color: 'var(--primary)', fontWeight: '600',
+                        }}>
+                          <div style={{
+                            width: '20px', height: '20px', borderRadius: '50%',
+                            backgroundColor: 'var(--primary)', flexShrink: 0,
+                            display: 'flex', alignItems: 'center', justifyContent: 'center', overflow: 'hidden',
+                          }}>
+                            {u.avatar_url
+                              ? <img src={u.avatar_url} alt="" style={{ width: '100%', height: '100%', objectFit: 'cover' }} />
+                              : <span style={{ color: '#fff', fontSize: '9px', fontWeight: '700' }}>{u.full_name.charAt(0)}</span>
+                            }
+                          </div>
+                          {u.full_name}
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              ))}
+
+              <div>
+                <div style={{ fontSize: '12px', fontWeight: '600', color: 'var(--text-secondary)', marginBottom: '6px', textTransform: 'uppercase' }}>
+                  Truk
+                </div>
+                {(eksekusiData.project_execution_trucks?.length ?? 0) === 0 ? (
+                  <span style={{ fontSize: '13px', color: 'var(--text-secondary)' }}>—</span>
+                ) : (
+                  <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap' }}>
+                    {eksekusiData.project_execution_trucks?.map((t: any) => (
+                      <div key={t.truck.id} style={{
+                        padding: '4px 10px', backgroundColor: '#EFF6FF',
+                        borderRadius: '20px', fontSize: '13px', color: 'var(--primary)', fontWeight: '600',
+                      }}>
+                        🚛 {t.truck.plate_number} ({t.truck.truck_type})
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            </div>
+          ) : !showEksekusiForm ? (
+            <div style={{ textAlign: 'center', padding: '16px', color: 'var(--text-secondary)', fontSize: '14px' }}>
+              Belum ada tim yang diassign
+            </div>
+          ) : null}
+
+          {/* Form Eksekusi */}
+          {showEksekusiForm && (isAdmin || currentUser.roles.includes('Kepala_WH')) && (
+            <div style={{ display: 'flex', flexDirection: 'column', gap: '16px' }}>
+              {!stockReady && (
+                <div style={{
+                  backgroundColor: '#FEF2F2', border: '1px solid #FECACA',
+                  borderRadius: '8px', padding: '12px', color: 'var(--error)', fontSize: '13px',
+                }}>
+                  ⚠️ Stok belum mencukupi untuk semua item BOQ. Pastikan semua item berstatus <strong>Cukup</strong> sebelum eksekusi.
+                </div>
+              )}
+
+              {eksekusiError && (
+                <div style={{
+                  backgroundColor: '#FEF2F2', border: '1px solid #FECACA',
+                  borderRadius: '8px', padding: '10px 12px', color: 'var(--error)', fontSize: '13px',
+                }}>{eksekusiError}</div>
+              )}
+
+              {/* Mandor */}
+              <div style={{ display: 'flex', flexDirection: 'column', gap: '5px' }}>
+                <label style={{ fontSize: '13px', fontWeight: '600', color: 'var(--text-primary)' }}>Mandor</label>
+                <select value={eksekusiForm.mandor_id}
+                  onChange={(e) => setEksekusiForm({ ...eksekusiForm, mandor_id: e.target.value })}
+                  style={selectStyle(!!eksekusiForm.mandor_id)}>
+                  <option value="">— Pilih Mandor (opsional) —</option>
+                  {mandorList.map((u) => <option key={u.id} value={u.id}>{u.full_name}</option>)}
+                </select>
+              </div>
+
+              {/* Tukang */}
+              <div>
+                <label style={{ fontSize: '13px', fontWeight: '600', color: 'var(--text-primary)', display: 'block', marginBottom: '8px' }}>
+                  Tukang (Installer)
+                </label>
+                <div style={{ display: 'flex', flexWrap: 'wrap', gap: '8px' }}>
+                  {tukangList.length === 0 ? (
+                    <span style={{ fontSize: '13px', color: 'var(--text-secondary)' }}>Tidak ada tukang tersedia</span>
+                  ) : tukangList.map((u) => {
+                    const active = eksekusiForm.installer_ids.includes(u.id);
+                    return (
+                      <label key={u.id} style={chipStyle(active)}>
+                        <input type="checkbox" style={{ display: 'none' }} checked={active}
+                          onChange={() => setEksekusiForm({
+                            ...eksekusiForm,
+                            installer_ids: toggleMultiSelect(eksekusiForm.installer_ids, u.id),
+                          })} />
+                        {u.full_name}
+                      </label>
+                    );
+                  })}
+                </div>
+              </div>
+
+              {/* Truk */}
+              <div>
+                <label style={{ fontSize: '13px', fontWeight: '600', color: 'var(--text-primary)', display: 'block', marginBottom: '8px' }}>
+                  Truk (Standby)
+                </label>
+                <div style={{ display: 'flex', flexWrap: 'wrap', gap: '8px' }}>
+                  {truckList.length === 0 ? (
+                    <span style={{ fontSize: '13px', color: 'var(--text-secondary)' }}>Tidak ada truk standby</span>
+                  ) : truckList.map((t) => {
+                    const active = eksekusiForm.truck_ids.includes(t.id);
+                    return (
+                      <label key={t.id} style={chipStyle(active)}>
+                        <input type="checkbox" style={{ display: 'none' }} checked={active}
+                          onChange={() => setEksekusiForm({
+                            ...eksekusiForm,
+                            truck_ids: toggleMultiSelect(eksekusiForm.truck_ids, t.id),
+                          })} />
+                        🚛 {t.plate_number} ({t.truck_type})
+                      </label>
+                    );
+                  })}
+                </div>
+              </div>
+
+              {/* Sopir */}
+              <div>
+                <label style={{ fontSize: '13px', fontWeight: '600', color: 'var(--text-primary)', display: 'block', marginBottom: '8px' }}>
+                  Sopir
+                </label>
+                <div style={{ display: 'flex', flexWrap: 'wrap', gap: '8px' }}>
+                  {sopirList.length === 0 ? (
+                    <span style={{ fontSize: '13px', color: 'var(--text-secondary)' }}>Tidak ada sopir tersedia</span>
+                  ) : sopirList.map((u) => {
+                    const active = eksekusiForm.driver_ids.includes(u.id);
+                    return (
+                      <label key={u.id} style={chipStyle(active)}>
+                        <input type="checkbox" style={{ display: 'none' }} checked={active}
+                          onChange={() => setEksekusiForm({
+                            ...eksekusiForm,
+                            driver_ids: toggleMultiSelect(eksekusiForm.driver_ids, u.id),
+                          })} />
+                        {u.full_name}
+                      </label>
+                    );
+                  })}
+                </div>
+              </div>
+
+              <div style={{ display: 'flex', justifyContent: 'flex-end', gap: '8px', paddingTop: '8px' }}>
+                <Button variant="secondary" onClick={() => setShowEksekusiForm(false)}>Batal</Button>
+                <Button onClick={handleEksekusi} disabled={isPending || !stockReady}
+                  variant={stockReady ? 'primary' : 'ghost'}>
+                  {isPending ? 'Memproses...' : eksekusiData ? '💾 Update Tim Eksekusi' : '🚀 Eksekusi Proyek'}
+                </Button>
+              </div>
+            </div>
+          )}
+        </div>
       </div>
     );
   };
+
+  // ─── Main Render ─────────────────────────────────────────────────────────────
 
   return (
     <div style={{ padding: '32px' }}>
@@ -751,41 +1048,28 @@ export function ProyekClient({ projects, warehouses, materials, currentUser }: P
 
       {/* Search + Filter */}
       <div style={{ display: 'flex', gap: '12px', marginBottom: '16px' }}>
-        <input
-          value={search}
-          onChange={(e) => setSearch(e.target.value)}
+        <input value={search} onChange={(e) => setSearch(e.target.value)}
           placeholder="Cari nama proyek atau klien..."
           style={{
             flex: 1, maxWidth: '320px', padding: '10px 12px',
             border: '1px solid var(--border)', borderRadius: '8px',
             fontSize: '14px', color: 'var(--text-primary)',
-            backgroundColor: 'var(--surface)', outline: 'none',
-            boxSizing: 'border-box' as const,
-          }}
-        />
-        <select
-          value={filterStatus}
-          onChange={(e) => setFilterStatus(e.target.value)}
+            backgroundColor: 'var(--surface)', outline: 'none', boxSizing: 'border-box',
+          }} />
+        <select value={filterStatus} onChange={(e) => setFilterStatus(e.target.value)}
           style={{
-            padding: '10px 12px', border: '1px solid var(--border)',
-            borderRadius: '8px', fontSize: '14px',
-            color: filterStatus ? 'var(--text-primary)' : 'var(--text-secondary)',
-            backgroundColor: 'var(--surface)', outline: 'none',
-            cursor: 'pointer', minWidth: '180px',
-          }}
-        >
+            padding: '10px 12px', border: '1px solid var(--border)', borderRadius: '8px',
+            fontSize: '14px', color: filterStatus ? 'var(--text-primary)' : 'var(--text-secondary)',
+            backgroundColor: 'var(--surface)', outline: 'none', cursor: 'pointer', minWidth: '180px',
+          }}>
           <option value="">Semua Status</option>
           {PROJECT_STATUSES.map((s) => <option key={s} value={s}>{s}</option>)}
         </select>
       </div>
 
       {/* Table */}
-      <div style={{
-        backgroundColor: 'var(--surface)', borderRadius: '12px',
-        border: '1px solid var(--border)', overflow: 'hidden',
-      }}>
-        <Table columns={columns} data={filtered}
-          keyExtractor={(p) => p.id} emptyText="Belum ada proyek" />
+      <div style={{ backgroundColor: 'var(--surface)', borderRadius: '12px', border: '1px solid var(--border)', overflow: 'hidden' }}>
+        <Table columns={columns} data={filtered} keyExtractor={(p) => p.id} emptyText="Belum ada proyek" />
       </div>
 
       {/* Modal Create */}
@@ -803,8 +1087,7 @@ export function ProyekClient({ projects, warehouses, materials, currentUser }: P
           {error && (
             <div style={{
               backgroundColor: '#FEF2F2', border: '1px solid #FECACA',
-              borderRadius: '8px', padding: '10px 12px',
-              color: 'var(--error)', fontSize: '13px',
+              borderRadius: '8px', padding: '10px 12px', color: 'var(--error)', fontSize: '13px',
             }}>{error}</div>
           )}
           {renderProjectFields()}
@@ -827,8 +1110,7 @@ export function ProyekClient({ projects, warehouses, materials, currentUser }: P
           {error && (
             <div style={{
               backgroundColor: '#FEF2F2', border: '1px solid #FECACA',
-              borderRadius: '8px', padding: '10px 12px',
-              color: 'var(--error)', fontSize: '13px',
+              borderRadius: '8px', padding: '10px 12px', color: 'var(--error)', fontSize: '13px',
             }}>{error}</div>
           )}
           {renderProjectFields()}
