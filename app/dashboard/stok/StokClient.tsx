@@ -284,7 +284,7 @@ export function StokClient({ stocks, materials, warehouses }: Props) {
           borderRadius: '8px', padding: '10px 12px',
           fontSize: '13px', color: '#92400E',
         }}>
-          ⚠️ Stok ini memiliki <strong>{selected.reserved_stock} {selected.material?.unit}</strong> yang
+          ⚠️ Stok ini memiliki <strong>{selected.reserved_stock}</strong> yang
           sedang direserved untuk proyek terkait. Reserved stock tidak bisa diubah manual.
         </div>
       )}
